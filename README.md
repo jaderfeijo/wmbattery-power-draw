@@ -1,6 +1,6 @@
 # wmbattery with power draw
 
-> Part of my [Window Maker customisations directory](https://gist.github.com/jaderfeijo/2b1dee6a59f6ef063f0d73f1e117b0af).
+> Part of [wmodern](https://github.com/jaderfeijo/wmodern), a modern desktop on Window Maker: `wmodern install battery` installs it and keeps it up to date.
 
 A patch for [`wmbattery`](https://www.dockapps.net/wmbattery), the battery dockapp for Window Maker, that shows the
 **power the battery is delivering or taking right now, in watts**, where the plug icon used to be.

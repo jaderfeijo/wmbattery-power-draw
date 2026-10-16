@@ -1,0 +1,187 @@
+Show power draw / intake instead of the plug icon
+
+Replace the plug icon at the left of the bottom panel with the battery's current
+power in whole watts, drawn in the existing small LCD font, with a "W" and a sign
+underneath: '-' draining the battery, '+' charging, '=' on AC with the battery idle.
+The power is read from the kernel's power_supply sysfs (power_now, or
+current_now * voltage_now). When it is not reported the original plug icon is
+drawn, as before.
+
+Applies to Debian's wmbattery 2.56-1 (apply with: patch -p1).
+Copyright (C) 2026 jaderfeijo. Licensed under the GNU GPL version 2, like wmbattery.
+---
+diff --git a/wmbattery.c b/wmbattery.c
+index 7c1a9d4..d6729bb 100644
+--- a/wmbattery.c
++++ b/wmbattery.c
+@@ -30,6 +30,7 @@
+ #include <signal.h>
+ #include <time.h>
+ #include <errno.h>
++#include <dirent.h>
+ #include <fcntl.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+@@ -585,18 +586,155 @@ void draw_image(int image)
+ 		   image_info[image].x, image_info[image].y);
+ }
+ 
++/*
++ * Power draw / intake.
++ *
++ * The left of the bottom panel (where the plug icon used to be) shows the power the battery is
++ * delivering or taking right now, in whole watts, using the same small LCD font as the percentage.
++ * Under it: a "W" and a sign. '-' = running on the battery (power draw), '+' = charging (power
++ * intake), '=' = on AC with the battery idle. If the kernel does not report the power, the
++ * original plug icon is shown instead.
++ */
++#define POWER_X 5		/* the free column left of the charging icon: x 5..16 */
++#define POWER_Y 40
++#define POWER_W 12
++#define POWER_H 18
++#define POWER_DIGITS_Y 42
++#define POWER_UNIT_Y 51
++#define POWER_CHAR_W 6
++#define POWER_CHAR_H 7
++
++static GC power_gc;
++static unsigned long power_lit, power_dark;
++
++static unsigned long power_color(const char *name)
++{
++	XColor c;
++	Colormap cmap = DefaultColormap(display, screen);
++
++	if (XParseColor(display, cmap, name, &c) && XAllocColor(display, cmap, &c))
++		return c.pixel;
++	return BlackPixel(display, screen);
++}
++
++static int read_sysfs_long(const char *path, long *value)
++{
++	FILE *f = fopen(path, "r");
++	int ok;
++
++	if (!f)
++		return 0;
++	ok = (fscanf(f, "%ld", value) == 1);
++	fclose(f);
++	return ok;
++}
++
++/* Total instantaneous power of all batteries, in watts. Returns -1 if the kernel does not say. */
++static double read_power_watts(void)
++{
++	DIR *dir = opendir("/sys/class/power_supply");
++	struct dirent *ent;
++	double total = 0;
++	int found = 0;
++
++	if (!dir)
++		return -1;
++	while ((ent = readdir(dir))) {
++		char path[320];
++		long power, current, voltage;
++
++		if (strncmp(ent->d_name, "BAT", 3))
++			continue;
++		snprintf(path, sizeof(path), "/sys/class/power_supply/%s/power_now", ent->d_name);
++		if (read_sysfs_long(path, &power)) {		/* microwatts */
++			total += (power < 0 ? -power : power) / 1e6;
++			found = 1;
++			continue;
++		}
++		snprintf(path, sizeof(path), "/sys/class/power_supply/%s/current_now", ent->d_name);
++		if (!read_sysfs_long(path, &current))
++			continue;
++		snprintf(path, sizeof(path), "/sys/class/power_supply/%s/voltage_now", ent->d_name);
++		if (!read_sysfs_long(path, &voltage))
++			continue;
++		total += (current < 0 ? -current : current) / 1e6 * (voltage / 1e6);	/* uA * uV */
++		found = 1;
++	}
++	closedir(dir);
++	return found ? total : -1;
++}
++
++static void draw_pixel_rows(const char *rows[5], int x, int y)
++{
++	int row, col;
++
++	for (row = 0; row < 5; row++)
++		for (col = 0; rows[row][col]; col++)
++			if (rows[row][col] == 'X')
++				XDrawPoint(display, images[FACE], power_gc, x + col, y + row);
++}
++
++static void draw_power_digit(int digit, int x)
++{
++	copy_image(SMALLFONT, image_info[SMALLFONT].charwidth * digit, 0,
++		   POWER_CHAR_W, POWER_CHAR_H, x, POWER_DIGITS_Y);
++}
++
++/* Returns 1 if it drew the power, 0 if the power is unknown (the caller then draws the plug icon). */
++static int draw_power(const apm_info *info)
++{
++	static const char *w_glyph[5] = {"X...X", "X...X", "X.X.X", "XX.XX", "X...X"};
++	static const char *plus[5] = {"...", ".X.", "XXX", ".X.", "..."};
++	static const char *minus[5] = {"...", "...", "XXX", "...", "..."};
++	static const char *equals[5] = {"...", "XXX", "...", "XXX", "..."};
++	const char **sign;
++	double watts = read_power_watts();
++	int n;
++
++	if (!power_gc) {
++		power_lit = power_color("#20b2ae");
++		power_dark = power_color("#202020");
++		power_gc = XCreateGC(display, images[FACE], 0, NULL);
++	}
++	if (watts < 0)
++		return 0;
++
++	XSetForeground(display, power_gc, power_dark);	/* wipe the plug icon's area */
++	XFillRectangle(display, images[FACE], power_gc, POWER_X, POWER_Y, POWER_W, POWER_H);
++
++	n = (int)(watts + 0.5);
++	if (n > 99)
++		n = 99;
++	if (n >= 10)
++		draw_power_digit(n / 10, POWER_X);
++	draw_power_digit(n % 10, POWER_X + POWER_CHAR_W);	/* a single digit sits on the right */
++
++	if (info->battery_flags & BATTERY_FLAGS_CHARGING)
++		sign = plus;
++	else if (info->ac_line_status == AC_LINE_STATUS_ON)
++		sign = equals;
++	else
++		sign = minus;
++	XSetForeground(display, power_gc, power_lit);
++	draw_pixel_rows(w_glyph, POWER_X + 1, POWER_UNIT_Y);
++	draw_pixel_rows(sign, POWER_X + 8, POWER_UNIT_Y);
++	return 1;
++}
++
+ void recalc_window(apm_info cur_info)
+ {
+ 	int time_left, hour_left, min_left, digit, x;
+ 	static int blinked;
+ 
+-	/* Display if it's plugged in. */
+-	switch (cur_info.ac_line_status) {
+-	case AC_LINE_STATUS_ON:
+-		draw_image(PLUGGED);
+-		break;
+-	default:
+-		draw_image(UNPLUGGED);
++	/* Show the power draw / intake; fall back to the plugged-in icon if it is unknown. */
++	if (!draw_power(&cur_info)) {
++		switch (cur_info.ac_line_status) {
++		case AC_LINE_STATUS_ON:
++			draw_image(PLUGGED);
++			break;
++		default:
++			draw_image(UNPLUGGED);
++		}
+ 	}
+ 
+ 	/* Display the appropriate color battery. */
